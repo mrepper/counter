@@ -97,7 +97,7 @@ fn user_ok_with_overwrite() -> io::Result<bool> {
     }
 }
 
-// A counter that persists the count in a text file
+// A counter that persists the count value to a text file
 impl FileCounter {
     fn new(path: PathBuf, value: Option<i64>, data_sync: bool) -> Result<Self, io::Error> {
         // Initial count precedence:
@@ -125,7 +125,7 @@ impl FileCounter {
                 } else if !line.is_empty() && !user_ok_with_overwrite()? {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
-                        "File contains non-counter data",
+                        "File contained non-counter data",
                     ));
                 }
             }
