@@ -1,16 +1,18 @@
-use std::fs::OpenOptions;
-use std::io::{self, BufRead, BufReader, ErrorKind, Write};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader, ErrorKind, Seek, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
+use crossterm::event::KeyEvent;
 use crossterm::{
     ExecutableCommand, cursor,
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     terminal::{self, ClearType},
 };
 use dialoguer::{Confirm, theme::ColorfulTheme};
 
-/// Tally counter
+/// Tally counter with file-backed storage
 #[derive(Parser)]
 #[command(version, about, long_about = None, max_term_width = 110)]
 struct Args {
@@ -21,49 +23,65 @@ struct Args {
     /// Starting value (default: 0)
     #[arg()]
     start_value: Option<i64>,
+
+    /// Disable syncing of data to disk on every operation
+    #[arg(short, long)]
+    no_sync: bool,
 }
 
 struct FileCounter {
-    path: PathBuf,
+    file: File,
     count: i64,
+    data_sync: bool,
+}
+
+fn user_ok_with_overwrite() -> bool {
+    Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("File contains non-counter data. Use anyway? (data will be lost!)")
+        .wait_for_newline(true)
+        .interact()
+        .unwrap()
 }
 
 // A counter that persists the count in a text file
 impl FileCounter {
-    fn new(path: PathBuf, value: Option<i64>) -> Result<Self, io::Error> {
+    fn new(path: PathBuf, value: Option<i64>, data_sync: bool) -> Result<Self, io::Error> {
         // Initial count precedence:
         //   1) `value` argument
         //   2) first line of file given by `path` argument
         //   3) 0
 
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+
         let mut count: i64 = 0;
 
         if let Some(value) = value {
             count = value;
-        } else if let Ok(file) = OpenOptions::new().read(true).open(&path) {
-            let mut reader = BufReader::new(file);
+        } else {
+            let mut reader = BufReader::new(&file);
             let mut line = String::new();
             if reader.read_line(&mut line).is_ok() {
                 if let Ok(value) = line.trim_end().parse::<i64>() {
                     count = value;
-                } else {
-                    // Prompt the user about using a file that has invalid contents
-                    let confirmation = Confirm::with_theme(&ColorfulTheme::default())
-                        .with_prompt("File contains invalid data. Use anyway?")
-                        .wait_for_newline(true)
-                        .interact()
-                        .unwrap();
-                    if !confirmation {
-                        return Err(io::Error::new(
-                            ErrorKind::InvalidInput,
-                            "Invalid file format",
-                        ));
-                    }
+                } else if !line.is_empty() && !user_ok_with_overwrite() {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "File contains non-counter data",
+                    ));
                 }
             }
         }
 
-        let counter = Self { path, count };
+        let mut counter = Self {
+            file,
+            count,
+            data_sync,
+        };
         counter.persist()?;
         Ok(counter)
     }
@@ -96,63 +114,77 @@ impl FileCounter {
         Ok(())
     }
 
-    fn persist(&self) -> Result<(), io::Error> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&self.path)?;
-
-        write!(file, "{}", self.count)?;
+    fn persist(&mut self) -> Result<(), io::Error> {
+        self.file.seek(io::SeekFrom::Start(0))?;
+        self.file.set_len(0)?;
+        self.file.write_all(self.count.to_string().as_bytes())?;
+        self.file.flush()?;
+        if self.data_sync {
+            self.file.sync_data()?;
+        }
         Ok(())
     }
 }
 
-fn get_character_choice_crossterm(
-    prompt: &str,
-    choices: &[char],
-    hidden_choices: &[char],
-) -> io::Result<char> {
-    let choices_str: String = choices
-        .iter()
-        .map(|&c| format!("{c}"))
-        .collect::<Vec<_>>()
-        .join("/");
-
+fn get_character_choice<T: Copy>(prompt: &str, choice_map: &HashMap<KeyEvent, T>) -> io::Result<T> {
     loop {
         // Clear line and show prompt
         io::stdout().execute(terminal::Clear(ClearType::CurrentLine))?;
-        print!("\r{prompt}    [{choices_str}]");
+        print!("\r{prompt}");
         io::stdout().flush()?;
 
-        // Read key event
+        // Read key event, return map value on match
         if let Event::Key(key_event) = event::read()? {
-            if let KeyCode::Char(ch) = key_event.code {
-                if choices.contains(&ch) || hidden_choices.contains(&ch) {
-                    return Ok(ch);
-                }
-            } else if KeyCode::Backspace == key_event.code {
-                return Ok('-');
+            if let Some(val) = choice_map.get(&key_event) {
+                return Ok(*val);
             }
         }
     }
 }
 
+// Helper function for building KeyEvents for arbitrary KeyCodes
+const fn keycode(c: KeyCode) -> KeyEvent {
+    KeyEvent::new(c, KeyModifiers::empty())
+}
+
+// Helper function for building KeyEvents for single characters
+const fn key(c: char) -> KeyEvent {
+    keycode(KeyCode::Char(c))
+}
+
 fn main_real() -> Result<(), io::Error> {
     let args = Args::parse();
-    let mut counter = FileCounter::new(args.path, args.start_value)?;
+    let mut counter = FileCounter::new(args.path, args.start_value, !args.no_sync)?;
+
+    // Map of input key presses to value we want returned from get_character_choice()
+    let choice_map = HashMap::from([
+        // Increment keys
+        (key('+'), '+'),
+        (key('='), '+'), // '+' without shift
+        (key(' '), '+'),
+        // Decrement keys
+        (key('-'), '-'),
+        (key('_'), '-'), // '-' with shift
+        (keycode(KeyCode::Backspace), '-'),
+        // Quit keys
+        (key('q'), 'q'),
+        (key('Q'), 'q'),
+        (
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), // ctrl-c
+            'q',
+        ),
+    ]);
 
     terminal::enable_raw_mode()?;
     io::stdout().execute(cursor::Hide)?;
     loop {
-        let prompt = format!("{}", counter.count);
-        let choice =
-            get_character_choice_crossterm(&prompt, &['+', '-', 'q'], &['=', '_', 'Q', ' '])?;
+        let prompt = format!("Count: {}    [+/-/q]", counter.count);
+        let choice = get_character_choice(&prompt, &choice_map)?;
         match choice {
-            '+' | '=' | ' ' => counter.increment()?,
-            '-' | '_' => counter.decrement()?,
-            'q' | 'Q' => break,
-            _ => panic!("invalid input"),
+            '+' => counter.increment()?,
+            '-' => counter.decrement()?,
+            'q' => break,
+            c => panic!("internal error: unexpected character accepted: '{c}'"),
         };
     }
     io::stdout().execute(cursor::Show)?;
@@ -163,6 +195,7 @@ fn main_real() -> Result<(), io::Error> {
 }
 
 fn main() {
+    // Show the Display of errors, not Debug
     if let Err(e) = main_real() {
         eprintln!("Error: {e}");
         std::process::exit(1);
