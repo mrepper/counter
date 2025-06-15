@@ -103,7 +103,7 @@ impl FileCounter {
             .write(true)
             .open(&self.path)?;
 
-        writeln!(file, "{}", self.count)?;
+        write!(file, "{}", self.count)?;
         Ok(())
     }
 }
