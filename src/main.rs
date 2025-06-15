@@ -126,7 +126,10 @@ impl FileCounter {
     }
 }
 
-fn get_character_choice<T: Copy>(prompt: &str, choice_map: &HashMap<KeyEvent, T>) -> io::Result<T> {
+fn get_character_choice<'a, T>(
+    prompt: &str,
+    choice_map: &'a HashMap<KeyEvent, T>,
+) -> io::Result<&'a T> {
     loop {
         // Clear line and show prompt
         io::stdout().execute(terminal::Clear(ClearType::CurrentLine))?;
@@ -136,7 +139,7 @@ fn get_character_choice<T: Copy>(prompt: &str, choice_map: &HashMap<KeyEvent, T>
         // Read key event, return map value on match
         if let Event::Key(key_event) = event::read()? {
             if let Some(val) = choice_map.get(&key_event) {
-                return Ok(*val);
+                return Ok(val);
             }
         }
     }
