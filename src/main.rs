@@ -10,7 +10,6 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     terminal::{self, ClearType},
 };
-use dialoguer::{Confirm, theme::ColorfulTheme};
 
 /// Tally counter with file-backed storage
 #[derive(Parser)]
@@ -35,12 +34,67 @@ struct FileCounter {
     data_sync: bool,
 }
 
-fn user_ok_with_overwrite() -> bool {
-    Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("File contains non-counter data. Use anyway? (data will be lost!)")
-        .wait_for_newline(true)
-        .interact()
-        .unwrap()
+fn get_character_choice<'a, T>(
+    prompt: &str,
+    choice_map: &'a HashMap<KeyEvent, T>,
+) -> io::Result<&'a T> {
+    loop {
+        // Clear line and show prompt
+        io::stdout().execute(terminal::Clear(ClearType::CurrentLine))?;
+        print!("\r{prompt}");
+        io::stdout().flush()?;
+
+        // Read key event, return map value on match
+        if let Event::Key(key_event) = event::read()? {
+            if let Some(val) = choice_map.get(&key_event) {
+                return Ok(val);
+            }
+        }
+    }
+}
+
+// Helper function for building KeyEvents for arbitrary KeyCodes
+const fn keycode(c: KeyCode) -> KeyEvent {
+    KeyEvent::new(c, KeyModifiers::empty())
+}
+
+// Helper function for building KeyEvents for single characters
+const fn key(c: char) -> KeyEvent {
+    keycode(KeyCode::Char(c))
+}
+
+fn user_ok_with_overwrite() -> io::Result<bool> {
+    let prompt = "File contains non-counter data. Use anyway? (data will be lost!)  [y/n]";
+
+    // Map of input key presses to value we want returned from get_character_choice()
+    let choice_map = HashMap::from([
+        // Yes
+        (key('y'), 'y'),
+        (key('Y'), 'y'),
+        // No
+        (key('n'), 'n'),
+        (key('N'), 'n'),
+        // Quit
+        (key('q'), 'q'),
+        (key('Q'), 'q'),
+        (
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), // ctrl-c
+            'q',
+        ),
+    ]);
+
+    terminal::enable_raw_mode()?;
+    io::stdout().execute(cursor::Hide)?;
+    let choice = get_character_choice(prompt, &choice_map)?;
+    io::stdout().execute(cursor::Show)?;
+    terminal::disable_raw_mode()?;
+    println!();
+    match choice {
+        'y' => Ok(true),
+        'n' => Ok(false),
+        'q' => std::process::exit(1),
+        c => panic!("internal error: unexpected character accepted: '{c}'"),
+    }
 }
 
 // A counter that persists the count in a text file
@@ -68,7 +122,7 @@ impl FileCounter {
             if reader.read_line(&mut line).is_ok() {
                 if let Ok(value) = line.trim_end().parse::<i64>() {
                     count = value;
-                } else if !line.is_empty() && !user_ok_with_overwrite() {
+                } else if !line.is_empty() && !user_ok_with_overwrite()? {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
                         "File contains non-counter data",
@@ -124,35 +178,6 @@ impl FileCounter {
         }
         Ok(())
     }
-}
-
-fn get_character_choice<'a, T>(
-    prompt: &str,
-    choice_map: &'a HashMap<KeyEvent, T>,
-) -> io::Result<&'a T> {
-    loop {
-        // Clear line and show prompt
-        io::stdout().execute(terminal::Clear(ClearType::CurrentLine))?;
-        print!("\r{prompt}");
-        io::stdout().flush()?;
-
-        // Read key event, return map value on match
-        if let Event::Key(key_event) = event::read()? {
-            if let Some(val) = choice_map.get(&key_event) {
-                return Ok(val);
-            }
-        }
-    }
-}
-
-// Helper function for building KeyEvents for arbitrary KeyCodes
-const fn keycode(c: KeyCode) -> KeyEvent {
-    KeyEvent::new(c, KeyModifiers::empty())
-}
-
-// Helper function for building KeyEvents for single characters
-const fn key(c: char) -> KeyEvent {
-    keycode(KeyCode::Char(c))
 }
 
 fn main_real() -> Result<(), io::Error> {
